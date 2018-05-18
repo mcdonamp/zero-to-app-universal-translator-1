@@ -14,67 +14,72 @@
 
 
 const functions = require('firebase-functions');
-const Speech = require('@google-cloud/speech');
-const speech = Speech({keyFilename: "service-account-credentials.json"});
-const Translate = require('@google-cloud/translate');
-const translate = Translate({keyFilename: "service-account-credentials.json"});
-const Encoding = Speech.v1.types.RecognitionConfig.AudioEncoding;
-const Firestore = require('@google-cloud/firestore');
-const getLanguageWithoutLocale = require("./utils").getLanguageWithoutLocale;
 
+const Speech = require('@google-cloud/speech');
+const speech = new Speech.SpeechClient({keyFilename: "service-account-credentials.json"});
+
+const Translate = require('@google-cloud/translate');
+const translate = new Translate({keyFilename: "service-account-credentials.json"});
+
+const Firestore = require('@google-cloud/firestore');
 const db = new Firestore();
+
+const getLanguageWithoutLocale = require("./utils").getLanguageWithoutLocale;
 
 exports.onUploadFS = functions.firestore
     .document("/uploads/{uploadId}")
-    .onWrite((event) => {
-        let data = event.data.data();
-        let language = data.language ? data.language : "en";
-        let sampleRate = data.sampleRate ? parseInt(data.sampleRate, 10) : 16000;
-        let encoding = data.encoding == "FLAC" ? Encoding.FLAC : Encoding.LINEAR16;
+    .onCreate((change, context) => {
+        let data = change.data();
+        let language = data.language ? data.language : "en-US";
 
-        const request = {
-            config: {
-                languageCode,
-                sampleRateHertz,
-                encoding
+        let request = {
+                'config': {
+                'languageCode': language,
+                'sampleRateHertz': 16000,
+                'encoding': "LINEAR16"
             },
-            audio: { uri : `gs://${process.env.GCP_PROJECT}.appspot.com/${data.fullPath}` }
+                'audio': { 
+                'uri': `gs://babel-fire.appspot.com/${data.fullPath}`
+            }
         };
 
         return speech.recognize(request).then((response) => {
             let transcript = response[0].results[0].alternatives[0].transcript;
-            return db.collection("transcripts").doc(event.params.uploadId).set({text: transcript, language: language});
+            return db.collection("transcripts").doc(context.params.uploadId).set({text: transcript, language: language});
         });
     });
 
 exports.onTranscriptFS = functions.firestore
     .document("/transcripts/{transcriptId}")
-    .onWrite((event) => {
-        let value = event.data.data();
-        let transcriptId = event.params.transcriptId;
+    .onCreate((change, context) => {
+        let value = change.data();
+        let transcriptId = context.params.transcriptId || "default";
         let text = value.text ? value.text : value;
+        let timestamp = new Date();
+        let tempMap = {timestamp: timestamp};
 
-        const languages = ["en", "es", "pt", "de", "ja", "hi", "nl", "fr", "pl"];
-
+        const languages = ["en", "es", "no", "de", "sv", "da", "fr"];
         const from = value.language ? getLanguageWithoutLocale(value.language) : "en";
 
-        let from = value.language ? getLanguageWithoutLocale(value.language) : "en";
         let promises = languages.map(to => {
             if (from == to) {
-                return db.collection("translations").doc(transcriptId).set({to: {text: text, language: from}}, {merge: true});
+                tempMap[to] = {"text": text, "language": from};
+                return Promise.resolve();
             } else {
                 // Call the Google Cloud Platform Translate API
                 return translate.translate(text, {
                     from,
                     to
                 }).then(result => {
-                    // Write the translation to the database
                     let translation = result[0];
-                    return db.collection("translations").doc(transcriptId).set({to: {text: translation, language: to}}, {merge: true});
+                    console.log(`Translation from ${from} to ${to} is ${translation} for id ${transcriptId}`);
+                    tempMap[to] = {"text": translation, "language": to};
+                    return Promise.resolve();
                 });
             }
         });
+        
         return Promise.all(promises).then(() => {
-            return db.collection("translations").doc(transcriptId).set(doc);
+            return db.collection("translations").doc(transcriptId).set(tempMap);
         });
     });

@@ -30,11 +30,11 @@ class ViewController: UIViewController {
     let languageArray = [
         "en",
         "es",
-        "pt",
+        "no",
         "de",
-        "ja",
-        "hi",
-        "nl"
+        "sv",
+        "da",
+        "fr"
     ]
     let languageDict = [
         "en": [
@@ -45,25 +45,25 @@ class ViewController: UIViewController {
             "name": "Español (España)",
             "locale": "es-ES"
         ],
-        "pt": [
-            "name": "Português (Brasil)",
-            "locale": "pt-BR"
+        "no": [
+            "name": "Norwegian (Norway)",
+            "locale": "no-NO"
         ],
         "de": [
             "name": "Deutsch (Deutschland)",
             "locale": "de-DE"
         ],
-        "ja": [
-            "name": "日本語（日本)",
-            "locale": "ja-JP"
+        "sv": [
+            "name": "Swedish（Sweden)",
+            "locale": "sv-SE"
         ],
-        "hi": [
-            "name": "हिन्दी (भारत)",
-            "locale": "hi-IN"
+        "da": [
+            "name": "Danish (Denmark)",
+            "locale": "da-DK"
         ],
-        "nl": [
-            "name": "Nederlands (Nederland)",
-            "locale": "nl-NL"
+        "fr": [
+            "name": "French (France)",
+            "locale": "fr-FR"
         ]
     ] as [String : [String: String]]
 
@@ -80,7 +80,7 @@ class ViewController: UIViewController {
 
     // Firebase
     var storage: Storage!
-    var database: Firestore!
+    var firestore: Firestore!
     var auth: Auth!
 
     var authUI: FUIAuth?
@@ -117,31 +117,33 @@ class ViewController: UIViewController {
         self.synthesizer.delegate = self
 
         // TODO 1: Set up Firebase (1)
-        // Set up Firebase
         self.storage = Storage.storage()
         self.auth = Auth.auth()
-        self.database = Firestore.firestore()
+        self.firestore = Firestore.firestore()
 
         // TODO: init FirebaseUI Auth (5)
-        // Set up FirebaseUI
         self.authUI = FUIAuth.defaultAuthUI()
         self.authUI?.delegate = self
-    }
-
-    override func viewWillAppear(_ animated: Bool) {
-        // TODO: show sign in if user isn't signed in (6)
         self.authUI?.providers = [
             FUIGoogleAuth()
         ]
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
         if (self.auth.currentUser == nil) {
             // No current user, so show a sign in view
             self.navigationItem.rightBarButtonItem?.title = "Log in"
-            let authViewController = self.authUI?.authViewController()
-            self.present(authViewController!, animated: true, completion: nil)
+            self.presentAuthViewController()
         } else {
             self.navigationItem.rightBarButtonItem?.title = "Log out"
             listenForTranslations()
         }
+    }
+    
+    func presentAuthViewController() {
+        // TODO: show sign in if user isn't signed in (6)
+        let authViewController = self.authUI?.authViewController()
+        self.present(authViewController!, animated: true, completion: nil)
     }
 
     // Handle record button
@@ -187,33 +189,33 @@ class ViewController: UIViewController {
     func uploadFile() {
         let file = documentsDirectory().appendingPathComponent(fileName)
 
-        // TODO: upload file and write to database (2-4)
+        // TODO: upload file and write to firestore (2-4)
         // Get storage reference and build metadata
         let uploadRef = self.storage.reference().child("uploads")
-        let dbRef = self.database.collection("uploads").document()
-        let uploadFile = uploadRef.child(dbRef.documentID)
+        let docRef = self.firestore.collection("uploads").document()
+        let uploadFile = uploadRef.child(docRef.documentID)
         let metadata = StorageMetadata()
         metadata.contentType = "LINEAR16"
-
+        
         // Upload the file
         uploadFile.putFile(from: file, metadata: metadata) { (metadata, error) in
-            // handle failure
+            // Handle failure
             if (error != nil) {
-                self.toast(message: "Failed to upload audio: \(String(describing: error))")
+                self.toast(message: "Failed to upload audio: \(error)")
+                // Write to Firestore
             } else {
                 self.toast(message: "Uploaded!")
                 let dict = [
                     "encoding": "LINEAR16",
                     "sampleRate": 16000,
                     "language": (self.languageDict[self.selectedLanguage]?["locale"])! as String,
-                    "fullPath": "uploads/\(dbRef.documentID)",
+                    "fullPath": "uploads/\(docRef.documentID)",
                     "timeCreated": FieldValue.serverTimestamp()
-                ] as [String : Any]
-                dbRef.setData(dict, completion: { error in
+                    ] as [String : Any]
+                docRef.setData(dict, completion: { error in
                     if error != nil {
-                        self.toast(message: "Failed to write to the database: \(String(describing: error))")
+                        self.toast(message: "Failed to write to the firestore: \(String(describing: error))")
                     }
-                    
                 })
             }
         }
@@ -231,50 +233,31 @@ class ViewController: UIViewController {
         } else {
             // Require log in flow
             self.navigationItem.rightBarButtonItem?.title = "Log out"
-            let authViewController = self.authUI?.authViewController()
-            self.present(authViewController!, animated: true, completion: nil)
+            self.presentAuthViewController()
         }
     }
 
     func listenForTranslations() {
         // TODO: listen for new translations (7-8)
         // Get a reference to translations
-        let translationsRef = self.database.collection("translations")
-
-        // Listen to last child added
-        translationsRef.order(by: "timestamp").addSnapshotListener({ (snapshot, error) in
+        let translationsRef = self.firestore.collection("translations")
+        
+        // Listen to last child added and play the data
+        translationsRef.order(by: "timestamp", descending: true).limit(to: 1).addSnapshotListener({ (snapshot, error) in
             if let error = error {
                 print(error)
             } else {
                 if (snapshot!.documents.count) > 0 {
-                    self.listenForLanguage(translationRef: (snapshot?.documents.last?.reference)!, languageCode: self.selectedLanguage)
+                    let data = snapshot?.documents.first?.data()[self.selectedLanguage] as? [String: String]
+                    let text = data!["text"]
+                    self.updateAndPlay(text: text!)
                 }
             }
         })
     }
 
-    func listenForLanguage(translationRef: DocumentReference, languageCode: String) {
-        // TODO: wait for our language (9-10)
-        // Wait for our language to appear
-        
-        translationRef.getDocument(completion: {(document, error) in
-            
-            if let error = error {
-                print(error)
-                return
-            }
-            
-            if (document?.exists)! {
-                guard let data = document?.data() as [String: AnyObject]?, let languages = data["languages"] as? [String: String], let translation = languages[languageCode] else { print("failure"); return }
-                self.updateAndPlay(text: translation)
-            }
-        })
-
-    }
-
     func updateAndPlay(text: String) {
         self.translatedTextView.text = text
-
         let locale = self.languageDict[self.selectedLanguage]?["locale"]
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = AVSpeechSynthesisVoice(language: locale)
